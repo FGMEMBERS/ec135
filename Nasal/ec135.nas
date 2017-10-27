@@ -21,6 +21,9 @@ var min = func(a, b) a < b ? a : b;
 # liveries =========================================================
 aircraft.livery.init("Aircraft/ec135/Models/liveries");
 
+# holder for the headsets ================
+headsetHolder = aircraft.door.new( "/sim/model/ec135/door-positions/headsetHolder", 0.5, 0);
+
 #doors=========================
 leftFrontDoor = aircraft.door.new( "/sim/model/ec135/door-positions/leftFrontDoor", 4, 0 );
 rightFrontDoor = aircraft.door.new( "/sim/model/ec135/door-positions/rightFrontDoor", 4, 0 );
@@ -190,6 +193,9 @@ var fuel = {
 	levell: func {
 		return me.lsupply.level();	
 	},
+	levelSupply: func(engineNumber) {
+		return engineNumber == 0 ? me.lsupply.level() : me.rsupply.level();
+	},
 	
 	consume: func(amount) {
 		return me.freeze ? 0 : me.rsupply.consume(amount) + me.lsupply.consume(amount);
@@ -209,6 +215,8 @@ var torque3_pct = props.globals.getNode("sim/model/ec135/torque-oei", 1);
 var torque4_pct = props.globals.getNode("sim/model/ec135/torque-aeo", 1);
 var target_rel_rpm = props.globals.getNode("controls/rotor/reltarget", 1);
 var max_rel_torque = props.globals.getNode("controls/rotor/maxreltorque", 1);
+var n1pct  = props.globals.getNode("engines/engine/n1-pct", 1);
+var n1pct2 = props.globals.getNode("engines/engine[1]/n1-pct", 1);
 
 
 
@@ -216,6 +224,7 @@ var max_rel_torque = props.globals.getNode("controls/rotor/maxreltorque", 1);
 var Engine = {
 	new: func(n) {
 		var m = { parents: [Engine] };
+		m.engineNumber = n;
 		m.in = props.globals.getNode("controls/engines", 1).getChild("engine", n, 1);
 		m.out = props.globals.getNode("engines", 1).getChild("engine", n, 1);
 		m.airtempN = props.globals.getNode("/environment/temperature-degc");
@@ -256,8 +265,6 @@ var Engine = {
 		me.n2LP.set(me.n2 = 0);
 	},
 	update: func(dt, trim = 0) {
-		var runr = props.globals.getNode("/engines/engine/running", 1);
-		var runl = props.globals.getNode("/engines/engine[1]/running", 1);
 		var starter = me.starterLP.filter(me.starterN.getValue() * 0.19);	# starter 15-20% N1max
 		me.powerN.setValue(me.power = clamp(me.powerN.getValue()));
 		var power = me.power * 1.00 + trim;					# 100% = N2% in flight position
@@ -274,14 +281,9 @@ var Engine = {
 				me.timer.start();
 			}
 
-		} elsif (power < 0.05 or !fuel.levelr()) {
-			runr.setBoolValue(0);
+		} elsif (power < 0.05 or !fuel.levelSupply(me.engineNumber)) {
+			me.runningN.setBoolValue(me.running = 0);
 			me.timer.stop();
-			
-		} elsif (power < 0.05 or !fuel.levell()) {
-			runl.setBoolValue(0);
-			me.timer.stop();
-
 		} else {
 			me.fuelflow = power;
 		}
@@ -694,11 +696,20 @@ torque.setDoubleValue(0);
 
 #max tqr value = 598600
 var update_torque = func(dt) {
+	# We only have the total torque on the rotor. To determine how much each engine is contributing to that total torque, we
+	# estimate the power output for each enginge see how much it contributes to the total power.
+	var enginePowerPct1 = math.pow(n1pct.getValue(), 6);  # Estimating the engine power from N1%. Better than nothing, but definitely needs improving.
+	var enginePowerPct2 = math.pow(n1pct2.getValue(), 6);
+
+	var trq_ratio = enginePowerPct1 / ( enginePowerPct1 + enginePowerPct2);
+	if (debug.isnan(trq_ratio)) {
+		trq_ratio = 0.5;
+	}
+
 	var f = dt / (0.2 + dt);
 	torque_val = torque.getValue() * f + torque_val * (1 - f);
-	torque_pct.setDoubleValue(torque_val / 6251);
-	torque_val2 = torque.getValue() * 0.000168055;
-	torque2_pct.setDoubleValue(torque_val2);
+	torque_pct.setDoubleValue(torque_val / 6251 * trq_ratio * 2);
+	torque2_pct.setDoubleValue(torque_val / 6251 * (1 - trq_ratio) * 2);
 	torque_val3 = (torque.getValue() * 0.000274855);
 	torque3_pct.setDoubleValue(torque_val3);
 	torque_val4 = (torque.getValue() * 0.000137427) * 1.035; #mean value * 0.000137621 as factor as engines are flat rated, but yasim doesn't simulate engines yet
@@ -1064,8 +1075,8 @@ setlistener("/sim/signals/fdm-initialized", func {
 	gui.menuEnable("autopilot", 0);
 	init_rotoranim();
 	vibration.init();
-	engines.init();
 	fuel.init();
+	engines.init();
 	mouse.init();
 
 	
